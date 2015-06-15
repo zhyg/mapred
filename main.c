@@ -13,6 +13,8 @@
 #include <execinfo.h>
 #include "util.h"
 
+#define MAPRED_VERSION "v0.2"
+
 extern int set_noblocking(int fd);
 extern int set_cloexec(int fd);
 extern int spawn_process(const char*, int*, int*);
@@ -41,6 +43,11 @@ static void usage(char* proc)
 
 int getopts(int argc, char** argv)
 {
+    if (argc == 1) {
+        usage(argv[0]);
+        exit(0);
+    }
+
     char* short_opt = "m:c:hv";
     struct option long_opt[] = {
         {"mapper", required_argument, NULL, 'm'},
@@ -64,7 +71,7 @@ int getopts(int argc, char** argv)
             exit(0);
             break;
         case 'v':
-            fprintf(stdout, "version mapred-0.2\n");
+            fprintf(stdout, "mapred %s\n", MAPRED_VERSION);
             exit(0);
         }
     }
