@@ -22,19 +22,12 @@ static struct timeval start, end;
    } while (0)
 #endif
 
-enum 
-{
-    STAT_READ_MORE,
-    STAT_WRITE_LINE,
-    STAT_LAST_BUF,
-    STAT_CLOSE_PIPE
-};
-
 typedef struct 
 {
     int fd;
     TBuffer buffer;
     struct event e;
+    int write_enabled;
 } WEVENT_T;
 
 typedef struct
@@ -42,8 +35,11 @@ typedef struct
     pthread_t id;
     struct event_base* base;
     IOstream stream;
-    int st;
+    struct event stdin_ev;
     int evno;
+    int next_child;
+    int stdin_eof;
+    int stdin_paused;
     WEVENT_T ev[];
 } WRITE_EV_THREAD;
 
@@ -80,90 +76,85 @@ static int cwrite(int fd, char* buf, size_t size)
     return count;
 }
 
-static void update_stat(int stat)
-{
-    wet->st = stat;
-}
-
 void event_handler(int fd, short e, void* args)
 {
-    char*   line =  NULL;
-    int     len  =  0; 
-    int     size =  0;
-
-    int st              = wet->st;
-    IOstream* stream    = &(wet->stream);
-    WEVENT_T* ev        = (WEVENT_T*)args;
+    WEVENT_T* ev = (WEVENT_T*)args;
 
     if (!isempty_buffer(&ev->buffer)) {
-        size = cwrite(fd, ev->buffer.cur, ev->buffer.size);
+        int size = cwrite(fd, ev->buffer.cur, ev->buffer.size);
         if (size < 0) {
-            log("write error, %s\n", strerror(errno));
-            update_stat(STAT_CLOSE_PIPE);
-        } else {
-            seek_buffer(&ev->buffer, size);
+            close(fd);
+            event_del(&ev->e);
+            ev->write_enabled = 0;
             return;
+        }
+        seek_buffer(&ev->buffer, size);
+    }
+
+    if (wet->stdin_paused && ev->buffer.size < (1 * 1024 * 1024)) {
+        int any_high = 0;
+        for (int i = 0; i < wet->evno; ++i) {
+            if (wet->ev[i].buffer.size >= (4 * 1024 * 1024)) {
+                any_high = 1;
+                break;
+            }
+        }
+        if (!any_high) {
+            event_add(&wet->stdin_ev, 0);
+            wet->stdin_paused = 0;
         }
     }
 
-    switch (st) {
-    case STAT_READ_MORE:
-        if (try_read_more(stream) == E_ERROR) {
-            update_stat(STAT_LAST_BUF);
-        } else {
-            update_stat(STAT_WRITE_LINE);
-        }
-        break;
-
-    case STAT_WRITE_LINE:
-        if (get_line(stream, &line, &len) == E_NEED_MORE || len == 0) {
-            update_stat(STAT_READ_MORE);
-            break;
-        }
-    
-        size = cwrite(fd, line, len);
-        if (size < 0) {
-            log("write error, %s\n", strerror(errno));
-            update_stat(STAT_CLOSE_PIPE);
-            break;
-        }
-
-        if (size < len) {
-            expand_buffer(&ev->buffer, line + size, len - size);
-            break;
-        }
-        break;
-
-    case STAT_LAST_BUF:
-        if (stream->bytes <= 0) {
-            update_stat(STAT_CLOSE_PIPE);
-            break;
-        }
-        size = cwrite(fd, stream->cur, stream->bytes);
-        if (size < 0) {
-            log("write error, %s\n", strerror(errno));
-            update_stat(STAT_CLOSE_PIPE);
-            break;
-        }
-
-        if (size == stream->bytes) {
-            stream->bytes = 0;
-            update_stat(STAT_CLOSE_PIPE);
-            break;
-        }
-
-        if (size < stream->bytes) {
-            expand_buffer(&ev->buffer, stream->cur+size, stream->bytes-size);
-            stream->bytes = 0;
-            break;
-        }
-        break;
-
-    case STAT_CLOSE_PIPE:
-        close(fd);
+    if (isempty_buffer(&ev->buffer)) {
         event_del(&ev->e);
-        break;
-    } 
+        ev->write_enabled = 0;
+        if (wet->stdin_eof) {
+            close(fd);
+        }
+    }
+}
+
+void stdin_handler(int fd, short e, void* args)
+{
+    WRITE_EV_THREAD* et = (WRITE_EV_THREAD*)args;
+    IOstream* stream = &(et->stream);
+    char* line = NULL;
+    int len = 0;
+
+    int r = try_read_more(stream);
+    if (r == E_ERROR) {
+        et->stdin_eof = 1;
+        event_del(&et->stdin_ev);
+
+        // Distribute remaining partial line if any
+        if (stream->bytes > 0) {
+            int child = et->next_child;
+            et->next_child = (et->next_child + 1) % et->evno;
+            expand_buffer(&et->ev[child].buffer, stream->cur, stream->bytes);
+            stream->bytes = 0;
+        }
+    }
+
+    while (get_line(stream, &line, &len) == E_OK) {
+        int child = et->next_child;
+        et->next_child = (et->next_child + 1) % et->evno;
+        expand_buffer(&et->ev[child].buffer, line, len);
+
+        if (et->ev[child].buffer.size > (4 * 1024 * 1024)) {
+            event_del(&et->stdin_ev);
+            et->stdin_paused = 1;
+            break; // Pause reading, let children drain
+        }
+    }
+
+    for (int i = 0; i < et->evno; ++i) {
+        if (!isempty_buffer(&et->ev[i].buffer) && !et->ev[i].write_enabled) {
+            event_add(&et->ev[i].e, 0);
+            et->ev[i].write_enabled = 1;
+        } else if (et->stdin_eof && isempty_buffer(&et->ev[i].buffer) && !et->ev[i].write_enabled) {
+            close(et->ev[i].fd);
+        }
+    }
 }
 
 void revent_handler(int fd, short e, void* args)
@@ -199,10 +190,15 @@ int thread_init(int num)
     // wet = (WRITE_EV_THREAD*)cmalloc(sizeof(WRITE_EV_THREAD) + num * sizeof(WEVENT_T));
     wet->base = event_init();
     wet->evno = num;
-    wet->st = STAT_READ_MORE;
+    wet->next_child = 0;
+    wet->stdin_eof = 0;
+    wet->stdin_paused = 0;
     memset(&wet->ev, 0, num * sizeof(WEVENT_T));
     create_stream(&wet->stream, 4096 * 1024);
     wet->stream.fd = STDIN_FILENO;
+    event_set(&wet->stdin_ev, STDIN_FILENO, EV_READ | EV_PERSIST, stdin_handler, wet);
+    event_base_set(wet->base, &wet->stdin_ev);
+    event_add(&wet->stdin_ev, 0);
 
     // ret = (READ_EV_THREAD*)cmalloc(sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t));
     if (cmalloc((void**)&ret, (sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t))) < 0 || ret == NULL) {
@@ -223,9 +219,9 @@ int thread_add(int wfd, int rfd)
     }
     event_set(&(wet->ev[i].e), wfd, EV_WRITE | EV_PERSIST, event_handler, (void*)&(wet->ev[i]));
     event_base_set(wet->base, &(wet->ev[i].e));
-    event_add(&(wet->ev[i].e), 0);
     alloc_buffer(&wet->ev[i].buffer, 4096);
     wet->ev[i].fd = wfd;
+    wet->ev[i].write_enabled = 0;
     
     struct fdev_t* evs = ret->evs;
     event_set(&evs[i].ev, rfd, EV_READ | EV_PERSIST, revent_handler, (void*)&evs[i]);

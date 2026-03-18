@@ -22,24 +22,21 @@ static char* last_component(const char* str)
     return ++bp;
 }
 
-#define check_exp(x, message) \
-    do { \
-        if ((x) < 0) { \
-            error(EXIT_FAILURE, errno, message); \
-        } \
-    } while (0)
-
 int set_noblocking(int fd) 
 {
     int flags = fcntl(fd, F_GETFL, 0);
-    check_exp(flags >= 0, "fcntl error");
+    if (flags < 0) {
+        error(EXIT_FAILURE, errno, "fcntl error");
+    }
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int set_cloexec(int fd) 
 {
     int flags = fcntl(fd, F_GETFD, 0);
-    check_exp(flags >= 0, "fcntl error");
+    if (flags < 0) {
+        error(EXIT_FAILURE, errno, "fcntl error");
+    }
     return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
@@ -63,8 +60,13 @@ void wait_children()
         if (WIFSIGNALED(status)) {
             int signo = WTERMSIG(status);
             fprintf(stderr, "child [%d] exit by signal %d\n", pid, signo);
+            exit(EXIT_FAILURE);
         } else {
-            fprintf(stderr, "child [%d] exit \n", pid);
+            int code = WEXITSTATUS(status);
+            fprintf(stderr, "child [%d] exit with status %d\n", pid, code);
+            if (code != 0) {
+                exit(EXIT_FAILURE);
+            }
         }
     }
 }

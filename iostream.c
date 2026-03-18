@@ -40,6 +40,10 @@ int try_read_more(IOstream* s)
     }
 
     if (s->bytes >= s->capacity) {
+        if (s->capacity >= (64 * 1024 * 1024)) {
+            log("read error, buffer capacity exceeded max limit (64MB)\n");
+            return E_ERROR;
+        }
         char* new_ptr = (char*)realloc(s->ptr, s->capacity * 2);
         if (!new_ptr) {
             error(EXIT_FAILURE, errno, "not enough memory, realloc buf");
