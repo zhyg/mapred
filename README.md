@@ -12,7 +12,7 @@ option is :
 ```
 
 ## Dependency
-- libev(libev.a 4.15)
+- libevent (`sudo apt-get install libevent-dev`)
 
 ## Example
 ```
