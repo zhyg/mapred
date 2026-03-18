@@ -27,7 +27,7 @@ extern int thread_term();
 
 static char cmd[4096];
 static int count = 2;
-static int pids[1024];
+static int pids[1024] = {0};
 
 static void usage(char* proc)
 {
@@ -91,7 +91,9 @@ void sig_handler(int signo)
     if (signo == SIGQUIT || signo == SIGTERM 
         || signo == SIGINT) {
         for (int i = 0; i < count; ++i) {
-            kill(pids[i], signo);
+            if (pids[i] > 0) {
+                kill(pids[i], signo);
+            }
         }    
     }
 }
@@ -125,6 +127,8 @@ int main(int argc, char* argv[])
     signal(SIGSEGV, btrace);
 
     getopts(argc, argv);
+
+    set_noblocking(STDIN_FILENO);
     thread_init(count);
 
     int in = 0, out = 0;

@@ -60,8 +60,13 @@ void wait_children()
         if (WIFSIGNALED(status)) {
             int signo = WTERMSIG(status);
             fprintf(stderr, "child [%d] exit by signal %d\n", pid, signo);
+            exit(EXIT_FAILURE);
         } else {
-            fprintf(stderr, "child [%d] exit \n", pid);
+            int code = WEXITSTATUS(status);
+            fprintf(stderr, "child [%d] exit with status %d\n", pid, code);
+            if (code != 0) {
+                exit(EXIT_FAILURE);
+            }
         }
     }
 }
