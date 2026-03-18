@@ -31,3 +31,6 @@ mapred
 
 # Debug files
 *.dSYM/
+tests/data/test_result_*
+tests/data/expected_*
+tests/data/result*.txt
