@@ -1,12 +1,25 @@
+CFLAGS_COMMON = -pipe -Wall -Wextra -D_GNU_SOURCE -std=gnu99
+CFLAGS_DEBUG = $(CFLAGS_COMMON) -g -O0
+CFLAGS_RELEASE = $(CFLAGS_COMMON) -O2 -DNDEBUG
+LDFLAGS = -pthread -levent -lm
+
+CFLAGS ?= $(CFLAGS_DEBUG)
+
+SRCS = main.c iostream.c os.c thread.c tbuf.c
+OBJS = $(SRCS:.c=.o)
+
 all: mapred
 
-mapred: main.o iostream.o os.o thread.o tbuf.o
-	gcc -g -O0 -o mapred *.o -pthread -levent -lm
+release: CFLAGS = $(CFLAGS_RELEASE)
+release: mapred
+
+mapred: $(OBJS)
+	gcc $(CFLAGS) -o mapred $(OBJS) $(LDFLAGS)
 
 %.o:%.c
-	gcc -pipe -Wall -D_GNU_SOURCE -g -O0 -std=gnu99 -c $< -o $@
+	gcc $(CFLAGS) -c $< -o $@
 
-.PHONY:clean
+.PHONY: all release clean
 clean:
-	rm -rf mapred
-	rm -rf *.o
+	rm -f mapred
+	rm -f *.o

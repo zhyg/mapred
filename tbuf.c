@@ -6,16 +6,15 @@
 #include "tbuf.h"
 #include "util.h"
 
-extern int cmalloc(void** ptr, int size);
+extern int cmalloc(void** ptr, size_t size);
 
-int alloc_buffer(TBuffer* b, int alloc)
+int alloc_buffer(TBuffer* b, size_t alloc)
 {
-    int rc = -1;
-    if (alloc < 0) {
+    if (alloc == 0) {
         return -1;
     }
 
-    rc = cmalloc((void**)&(b->ptr), alloc);
+    int rc = cmalloc((void**)&(b->ptr), alloc);
     if (rc < 0 || !b->ptr) {
         error(EXIT_FAILURE, errno, "not enough memory!\n");
         return -1;
@@ -27,18 +26,23 @@ int alloc_buffer(TBuffer* b, int alloc)
     return 0;
 }
 
-int expand_buffer(TBuffer* b, char* d, int size)
+int expand_buffer(TBuffer* b, char* d, size_t size)
 {
     while (1) {
-        int remain = (b->ptr - b->cur) + b->capacity - b->size - size;
-        if (remain >= 0) {
-            memcpy(b->cur+b->size, d, size);
+        size_t used = (size_t)(b->cur - b->ptr) + b->size;
+        if (used + size <= b->capacity) {
+            memcpy(b->cur + b->size, d, size);
             b->size += size;
             return 0;
         }
 
+        size_t new_cap = b->capacity * 2;
+        if (new_cap < b->size + size) {
+            new_cap = b->size + size;
+        }
+
         char* p = NULL;
-        int rc = cmalloc((void**)&p, (int)(b->capacity + size));
+        int rc = cmalloc((void**)&p, new_cap);
         if (p == NULL || rc < 0) {
             error(EXIT_FAILURE, errno, "no memory\n");
             return -1;
@@ -47,12 +51,12 @@ int expand_buffer(TBuffer* b, char* d, int size)
         free(b->ptr);
         b->ptr = p;
         b->cur = b->ptr;
-        b->capacity += size;
+        b->capacity = new_cap;
     }
     return 0;
 }
 
-int seek_buffer(TBuffer* b, int size) 
+int seek_buffer(TBuffer* b, size_t size) 
 {
     if (b->size <= size) {
         b->cur = b->ptr;
@@ -74,6 +78,10 @@ int dealloc_buffer(TBuffer* b)
 {
     if (b->ptr != NULL) {
         free(b->ptr);
+        b->ptr = NULL;
+        b->cur = NULL;
+        b->size = 0;
+        b->capacity = 0;
     }
     return 0;
 }

@@ -58,25 +58,26 @@ typedef struct
 
 static WRITE_EV_THREAD* wet;
 static READ_EV_THREAD* ret;
-extern int cmalloc(void** ptr, int size);
+static int thread_add_idx = 0;
+extern int cmalloc(void** ptr, size_t size);
 
-static int cwrite(int fd, char* buf, size_t size)
+static ssize_t cwrite(int fd, char* buf, size_t size)
 {
-    int count = 0;
+    size_t count = 0;
     do { 
-        int s = write(fd, buf + count, size - count);
+        ssize_t s = write(fd, buf + count, size - count);
         if (s < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN) break;
             fprintf(stderr, "write error occur\n");
             return -1;
         }
-        count += s;
+        count += (size_t)s;
     } while (count < size);
-    return count;
+    return (ssize_t)count;
 }
 
-void event_handler(int fd, short e, void* args)
+void event_handler(int fd, short e __attribute__((unused)), void* args)
 {
     WEVENT_T* ev = (WEVENT_T*)args;
 
@@ -114,7 +115,7 @@ void event_handler(int fd, short e, void* args)
     }
 }
 
-void stdin_handler(int fd, short e, void* args)
+void stdin_handler(int fd __attribute__((unused)), short e __attribute__((unused)), void* args)
 {
     WRITE_EV_THREAD* et = (WRITE_EV_THREAD*)args;
     IOstream* stream = &(et->stream);
@@ -157,7 +158,7 @@ void stdin_handler(int fd, short e, void* args)
     }
 }
 
-void revent_handler(int fd, short e, void* args)
+void revent_handler(int fd __attribute__((unused)), short e __attribute__((unused)), void* args)
 {
     char*   line = NULL;
     int     len = 0;
@@ -212,11 +213,11 @@ int thread_init(int num)
 
 int thread_add(int wfd, int rfd) 
 {
-    static int i = 0;
-    if (i >= wet->evno) {
-        log("thread add error, out of bouder\n");
+    if (thread_add_idx >= wet->evno) {
+        log("thread add error, out of bound\n");
         return -1;
     }
+    int i = thread_add_idx;
     event_set(&(wet->ev[i].e), wfd, EV_WRITE | EV_PERSIST, event_handler, (void*)&(wet->ev[i]));
     event_base_set(wet->base, &(wet->ev[i].e));
     alloc_buffer(&wet->ev[i].buffer, 4096);
@@ -230,7 +231,7 @@ int thread_add(int wfd, int rfd)
     create_stream(&evs[i].stream, 4096);
     evs[i].stream.fd = rfd;
 
-    ++i;
+    ++thread_add_idx;
     return 0;
 }
 
@@ -264,20 +265,23 @@ int thread_start()
 
 int thread_term()
 {
+    void* retval = NULL;
+
+    pthread_join(wet->id, &retval);
     for (int i = 0; i < wet->evno; ++i) {
-        WEVENT_T e = wet->ev[i];
-        dealloc_buffer(&(e.buffer));
+        dealloc_buffer(&(wet->ev[i].buffer));
     }
     event_base_free(wet->base);
     close_stream(&wet->stream);
     free(wet);
     
-    void* retval = NULL;
     pthread_join(ret->id, &retval);
     event_base_free(ret->base);
     for (int i = 0; i < ret->evno; ++i) {
         close_stream(&ret->evs[i].stream);
     }
     free(ret);
+
+    thread_add_idx = 0;
     return 0;
 }

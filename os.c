@@ -7,8 +7,7 @@
 #include <error.h>
 #include <fcntl.h>
 #include <string.h>
-
-#define ALIGN(x, y) (((x) + (y) - 1) & ~((y) - 1))
+#include "util.h"
 
 static char* get_shell()
 {
@@ -19,6 +18,9 @@ static char* get_shell()
 static char* last_component(const char* str)
 {
     char* bp = strrchr(str, (int)'/');
+    if (bp == NULL) {
+        return (char*)str;
+    }
     return ++bp;
 }
 
@@ -40,12 +42,11 @@ int set_cloexec(int fd)
     return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-int cmalloc(void** ptr, int size) 
+int cmalloc(void** ptr, size_t size) 
 {
-    int rc = -1;
     size = ALIGN(size, 16);
-    rc = posix_memalign(ptr, 16, size);
-    if (rc < 0 || *ptr == NULL) {
+    int rc = posix_memalign(ptr, 16, size);
+    if (rc != 0 || *ptr == NULL) {
         fprintf(stderr, "alloc error\n");
         return -1;
     }

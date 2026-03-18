@@ -1,5 +1,7 @@
-#ifndef _BUF_H
-#define _BUF_H
+#ifndef MAPRED_IOSTREAM_H
+#define MAPRED_IOSTREAM_H
+
+#include <stddef.h>
 
 enum 
 {
@@ -23,4 +25,4 @@ int get_line(IOstream* stream, char** line, int* size);
 int get_all_lines(IOstream* stream, char** line, int* len);
 int close_stream(IOstream* stream);
 
-#endif /* _BUF_H */
+#endif /* MAPRED_IOSTREAM_H */

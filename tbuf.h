@@ -1,18 +1,20 @@
-#ifndef _T_BUFFER_H
-#define _T_BUFFER_H
+#ifndef MAPRED_TBUF_H
+#define MAPRED_TBUF_H
+
+#include <stddef.h>
 
 typedef struct
 {
     char*   ptr;
     char*   cur;
-    int     size;
-    int     capacity;
+    size_t  size;
+    size_t  capacity;
 }TBuffer;
 
-int alloc_buffer(TBuffer* b, int alloc);
-int expand_buffer(TBuffer* b, char* d, int size);
-int seek_buffer(TBuffer* b, int size);
+int alloc_buffer(TBuffer* b, size_t alloc);
+int expand_buffer(TBuffer* b, char* d, size_t size);
+int seek_buffer(TBuffer* b, size_t size);
 int isempty_buffer(TBuffer* b);
 int dealloc_buffer(TBuffer* b);
 
-#endif /* _T_BUFFER_H */
+#endif /* MAPRED_TBUF_H */

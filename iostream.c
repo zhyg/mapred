@@ -10,6 +10,7 @@
 
 int create_stream(IOstream* stream, int bufsize)
 {
+    stream->fd = -1;
     stream->capacity = bufsize;
     stream->bytes = 0;
     stream->ptr = (char*)malloc(stream->capacity);
@@ -22,6 +23,10 @@ int create_stream(IOstream* stream, int bufsize)
 
 int close_stream(IOstream* stream)
 {
+    if (stream->fd >= 0) {
+        close(stream->fd);
+        stream->fd = -1;
+    }
     if (stream->ptr) {
         free(stream->ptr);
     }

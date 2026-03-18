@@ -14,6 +14,8 @@
 #include "util.h"
 
 #define MAPRED_VERSION "v0.2"
+#define MAX_PROCESSES 1024
+#define BACKTRACE_DEPTH 10
 
 extern int set_noblocking(int fd);
 extern int set_cloexec(int fd);
@@ -27,7 +29,7 @@ extern int thread_term();
 
 static char cmd[4096];
 static int count = 2;
-static int pids[1024] = {0};
+static int pids[MAX_PROCESSES] = {0};
 
 static void usage(char* proc)
 {
@@ -59,13 +61,26 @@ int getopts(int argc, char** argv)
     int o = -1;
     while ((o = getopt_long(argc, argv, short_opt, long_opt, NULL)) != -1) {
         switch (o) {
-        case 'm':
-            memset(cmd, 0, 4096);
-            memcpy(cmd, optarg, strlen(optarg));
+        case 'm': {
+            size_t len = strlen(optarg);
+            if (len >= sizeof(cmd)) {
+                fprintf(stderr, "mapper command too long (max %zu)\n", sizeof(cmd) - 1);
+                exit(EXIT_FAILURE);
+            }
+            memset(cmd, 0, sizeof(cmd));
+            memcpy(cmd, optarg, len);
             break;
-        case 'c':
-            count = atoi(optarg);
+        }
+        case 'c': {
+            char *endptr = NULL;
+            long val = strtol(optarg, &endptr, 10);
+            if (*endptr != '\0' || val < 1 || val > MAX_PROCESSES) {
+                fprintf(stderr, "invalid count: must be between 1 and %d\n", MAX_PROCESSES);
+                exit(EXIT_FAILURE);
+            }
+            count = (int)val;
             break;
+        }
         case 'h':
             usage(argv[0]);
             exit(0);
@@ -86,7 +101,7 @@ int getopts(int argc, char** argv)
     return 0;
 }
 
-void sig_handler(int signo)
+static void sig_handler(int signo)
 {
     if (signo == SIGQUIT || signo == SIGTERM 
         || signo == SIGINT) {
@@ -94,37 +109,40 @@ void sig_handler(int signo)
             if (pids[i] > 0) {
                 kill(pids[i], signo);
             }
-        }    
+        }
+        _exit(128 + signo);
     }
 }
 
 static void btrace(int signo)
 {
-    void **btrace = (void**)malloc(sizeof(void *) * 10);
-    size_t bt_size, i;
-    char **bt_strings;
+    void *bt_buf[BACKTRACE_DEPTH];
+    int bt_size;
 
-    bt_size = backtrace(btrace, 10);
+    bt_size = backtrace(bt_buf, BACKTRACE_DEPTH);
+    backtrace_symbols_fd(bt_buf, bt_size, STDERR_FILENO);
+    _exit(128 + signo);
+}
 
-    bt_strings = backtrace_symbols(btrace, bt_size);
-
-    log("*** backtrace of %d ***\n", (int) getpid());
-    for(i=0;i<bt_size;i++) {
-        log("%s\n", bt_strings[i]);
-    }    
-
-    free(btrace);
-    log("*** end of backtrace ***\n");
-    exit(1);
+static void setup_signal(int signo, void (*handler)(int))
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(signo, &sa, NULL) < 0) {
+        error(EXIT_FAILURE, errno, "sigaction error");
+    }
 }
 
 int main(int argc, char* argv[])
 {
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGQUIT, sig_handler);
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
-    signal(SIGSEGV, btrace);
+    setup_signal(SIGPIPE, SIG_IGN);
+    setup_signal(SIGQUIT, sig_handler);
+    setup_signal(SIGINT, sig_handler);
+    setup_signal(SIGTERM, sig_handler);
+    setup_signal(SIGSEGV, btrace);
 
     getopts(argc, argv);
 
