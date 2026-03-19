@@ -59,6 +59,7 @@ typedef struct
 static WRITE_EV_THREAD* wet;
 static READ_EV_THREAD* ret;
 static int thread_add_idx = 0;
+static int thread_error = 0;
 extern int cmalloc(void** ptr, size_t size);
 
 static ssize_t cwrite(int fd, char* buf, size_t size)
@@ -77,6 +78,13 @@ static ssize_t cwrite(int fd, char* buf, size_t size)
     return (ssize_t)count;
 }
 
+static void stop_event_loop(struct event_base* base)
+{
+    if (base != NULL) {
+        event_base_loopbreak(base);
+    }
+}
+
 void event_handler(int fd, short e __attribute__((unused)), void* args)
 {
     WEVENT_T* ev = (WEVENT_T*)args;
@@ -84,6 +92,7 @@ void event_handler(int fd, short e __attribute__((unused)), void* args)
     if (!isempty_buffer(&ev->buffer)) {
         int size = cwrite(fd, ev->buffer.cur, ev->buffer.size);
         if (size < 0) {
+            thread_error = 1;
             close(fd);
             event_del(&ev->e);
             ev->write_enabled = 0;
@@ -124,6 +133,11 @@ void stdin_handler(int fd __attribute__((unused)), short e __attribute__((unused
 
     int r = try_read_more(stream);
     if (r == E_ERROR) {
+        thread_error = 1;
+        log("stdin read error\n");
+        et->stdin_eof = 1;
+        event_del(&et->stdin_ev);
+    } else if (r == E_EOF) {
         et->stdin_eof = 1;
         event_del(&et->stdin_ev);
 
@@ -165,7 +179,15 @@ void revent_handler(int fd __attribute__((unused)), short e __attribute__((unuse
     struct  fdev_t* fdev = (struct fdev_t*)args;
     IOstream* b = &fdev->stream;
 
-    if (try_read_more(b) == E_ERROR) {
+    int rc = try_read_more(b);
+    if (rc == E_ERROR) {
+        thread_error = 1;
+        log("child output read error\n");
+        event_del(&fdev->ev);
+        return;
+    }
+
+    if (rc == E_EOF) {
         if (b->bytes > 0) {
             cwrite(STDOUT_FILENO, b->cur, b->bytes);
         }
@@ -175,6 +197,7 @@ void revent_handler(int fd __attribute__((unused)), short e __attribute__((unuse
 
     for (; get_line(b, &line, &len) == E_OK; ) {
         if (cwrite(STDOUT_FILENO, line, len) < 0) {
+            thread_error = 1;
             log("STDOUT write error: %s", strerror(errno));
             event_del(&fdev->ev);
             return;
@@ -208,6 +231,7 @@ int thread_init(int num)
     }
     ret->base = event_init();
     ret->evno = num;
+    thread_error = 0;
     return 0;
 }
 
@@ -251,13 +275,17 @@ static void* rthread_proc(void* args)
 
 int thread_start()
 {
-    if (pthread_create(&wet->id, NULL, wthread_proc, (void*)wet) < 0) {
-        log("pthread_create error\n");
+    int rc = pthread_create(&wet->id, NULL, wthread_proc, (void*)wet);
+    if (rc != 0) {
+        log("pthread_create error: %s\n", strerror(rc));
         return -1;
     }
 
-    if (pthread_create(&ret->id, NULL, rthread_proc, (void*)ret) < 0) {
-        log("pthread_create error\n");
+    rc = pthread_create(&ret->id, NULL, rthread_proc, (void*)ret);
+    if (rc != 0) {
+        log("pthread_create error: %s\n", strerror(rc));
+        stop_event_loop(wet->base);
+        pthread_join(wet->id, NULL);
         return -1;
     }
     return 0;
@@ -284,4 +312,9 @@ int thread_term()
 
     thread_add_idx = 0;
     return 0;
+}
+
+int thread_failed()
+{
+    return thread_error;
 }

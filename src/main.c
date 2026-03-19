@@ -20,16 +20,43 @@
 extern int set_noblocking(int fd);
 extern int set_cloexec(int fd);
 extern int spawn_process(const char*, int*, int*);
-extern void wait_children();
+extern int wait_children();
 
 extern int thread_init(int);
 extern int thread_add(int, int);
 extern int thread_start();
 extern int thread_term();
+extern int thread_failed();
 
 static char cmd[4096];
 static int count = 2;
 static int pids[MAX_PROCESSES] = {0};
+
+static void close_fd_if_open(int *fd)
+{
+    if (*fd >= 0) {
+        close(*fd);
+        *fd = -1;
+    }
+}
+
+static int require_success(int rc, const char* msg)
+{
+    if (rc < 0) {
+        fprintf(stderr, "%s\n", msg);
+        return -1;
+    }
+    return 0;
+}
+
+static void terminate_children(int signo)
+{
+    for (int i = 0; i < count; ++i) {
+        if (pids[i] > 0) {
+            kill(pids[i], signo);
+        }
+    }
+}
 
 static void usage(char* proc)
 {
@@ -55,7 +82,8 @@ int getopts(int argc, char** argv)
         {"mapper", required_argument, NULL, 'm'},
         {"count", required_argument, NULL, 'c'},
         {"help", no_argument, NULL, 'h'},
-        {"version", no_argument, NULL, 'v'}
+        {"version", no_argument, NULL, 'v'},
+        {0, 0, 0, 0}
     };
 
     int o = -1;
@@ -89,6 +117,12 @@ int getopts(int argc, char** argv)
             fprintf(stdout, "mapred %s\n", MAPRED_VERSION);
             exit(0);
         }
+    }
+
+    if (cmd[0] == '\0') {
+        fprintf(stderr, "missing required --mapper/-m option\n");
+        usage(argv[0]);
+        exit(EXIT_FAILURE);
     }
 
     if (optind < argc) {
@@ -138,6 +172,11 @@ static void setup_signal(int signo, void (*handler)(int))
 
 int main(int argc, char* argv[])
 {
+    int rc = EXIT_FAILURE;
+    int in = -1;
+    int out = -1;
+    int threads_started = 0;
+
     setup_signal(SIGPIPE, SIG_IGN);
     setup_signal(SIGQUIT, sig_handler);
     setup_signal(SIGINT, sig_handler);
@@ -146,22 +185,55 @@ int main(int argc, char* argv[])
 
     getopts(argc, argv);
 
-    set_noblocking(STDIN_FILENO);
-    thread_init(count);
-
-    int in = 0, out = 0;
-    for (int i = 0; i < count; ++i) {
-        int pid = spawn_process(cmd, &in, &out);
-        set_cloexec(out);
-        set_cloexec(in);
-        set_noblocking(out);
-        set_noblocking(in);
-        thread_add(out, in);
-        pids[i] = pid;
+    if (require_success(set_noblocking(STDIN_FILENO), "failed to set stdin non-blocking") < 0) {
+        goto cleanup;
+    }
+    if (thread_init(count) < 0) {
+        goto cleanup;
     }
 
-    thread_start();
-    wait_children();
+    for (int i = 0; i < count; ++i) {
+        int pid = spawn_process(cmd, &in, &out);
+        if (require_success(set_cloexec(out), "failed to set close-on-exec on child stdin") < 0 ||
+            require_success(set_cloexec(in), "failed to set close-on-exec on child stdout") < 0 ||
+            require_success(set_noblocking(out), "failed to set child stdin non-blocking") < 0 ||
+            require_success(set_noblocking(in), "failed to set child stdout non-blocking") < 0 ||
+            thread_add(out, in) < 0) {
+            if (pid > 0) {
+                kill(pid, SIGTERM);
+            }
+            close_fd_if_open(&out);
+            close_fd_if_open(&in);
+            goto cleanup;
+        }
+        pids[i] = pid;
+        in = -1;
+        out = -1;
+    }
+
+    if (thread_start() < 0) {
+        goto cleanup;
+    }
+    threads_started = 1;
+    if (wait_children() < 0) {
+        goto cleanup;
+    }
     thread_term();
-    return 0;
+    threads_started = 0;
+    if (thread_failed()) {
+        goto cleanup;
+    }
+    rc = EXIT_SUCCESS;
+
+cleanup:
+    close_fd_if_open(&in);
+    close_fd_if_open(&out);
+    if (rc != EXIT_SUCCESS) {
+        terminate_children(SIGTERM);
+        wait_children();
+    }
+    if (threads_started) {
+        thread_term();
+    }
+    return rc;
 }
