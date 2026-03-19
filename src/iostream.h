@@ -7,7 +7,8 @@ enum
 {
     E_OK = 0,
     E_ERROR,
-    E_NEED_MORE
+    E_NEED_MORE,
+    E_EOF
 };
 
 typedef struct

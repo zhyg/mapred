@@ -59,6 +59,10 @@ typedef struct
 static WRITE_EV_THREAD* wet;
 static READ_EV_THREAD* ret;
 static int thread_add_idx = 0;
+static int thread_error = 0;
+static int wet_thread_started = 0;
+static int ret_thread_started = 0;
+static int thread_initialized = 0;
 extern int cmalloc(void** ptr, size_t size);
 
 static ssize_t cwrite(int fd, char* buf, size_t size)
@@ -77,6 +81,18 @@ static ssize_t cwrite(int fd, char* buf, size_t size)
     return (ssize_t)count;
 }
 
+static void stop_event_loop(struct event_base* base)
+{
+    if (base != NULL) {
+        event_base_loopbreak(base);
+    }
+}
+
+static void set_thread_error(void)
+{
+    __atomic_store_n(&thread_error, 1, __ATOMIC_RELAXED);
+}
+
 void event_handler(int fd, short e __attribute__((unused)), void* args)
 {
     WEVENT_T* ev = (WEVENT_T*)args;
@@ -84,6 +100,7 @@ void event_handler(int fd, short e __attribute__((unused)), void* args)
     if (!isempty_buffer(&ev->buffer)) {
         int size = cwrite(fd, ev->buffer.cur, ev->buffer.size);
         if (size < 0) {
+            set_thread_error();
             close(fd);
             event_del(&ev->e);
             ev->write_enabled = 0;
@@ -124,6 +141,11 @@ void stdin_handler(int fd __attribute__((unused)), short e __attribute__((unused
 
     int r = try_read_more(stream);
     if (r == E_ERROR) {
+        set_thread_error();
+        log("stdin read error\n");
+        et->stdin_eof = 1;
+        event_del(&et->stdin_ev);
+    } else if (r == E_EOF) {
         et->stdin_eof = 1;
         event_del(&et->stdin_ev);
 
@@ -165,7 +187,15 @@ void revent_handler(int fd __attribute__((unused)), short e __attribute__((unuse
     struct  fdev_t* fdev = (struct fdev_t*)args;
     IOstream* b = &fdev->stream;
 
-    if (try_read_more(b) == E_ERROR) {
+    int rc = try_read_more(b);
+    if (rc == E_ERROR) {
+        set_thread_error();
+        log("child output read error\n");
+        event_del(&fdev->ev);
+        return;
+    }
+
+    if (rc == E_EOF) {
         if (b->bytes > 0) {
             cwrite(STDOUT_FILENO, b->cur, b->bytes);
         }
@@ -175,6 +205,7 @@ void revent_handler(int fd __attribute__((unused)), short e __attribute__((unuse
 
     for (; get_line(b, &line, &len) == E_OK; ) {
         if (cwrite(STDOUT_FILENO, line, len) < 0) {
+            set_thread_error();
             log("STDOUT write error: %s", strerror(errno));
             event_del(&fdev->ev);
             return;
@@ -184,30 +215,73 @@ void revent_handler(int fd __attribute__((unused)), short e __attribute__((unuse
 
 int thread_init(int num)
 {
-    if (cmalloc((void**)&wet, (sizeof(WRITE_EV_THREAD) + num * sizeof(WEVENT_T))) < 0 || wet == NULL) {
-        error(EXIT_FAILURE, errno, "not enough memory\n");
-        return -1;
-    } 
-    // wet = (WRITE_EV_THREAD*)cmalloc(sizeof(WRITE_EV_THREAD) + num * sizeof(WEVENT_T));
-    wet->base = event_init();
-    wet->evno = num;
-    wet->next_child = 0;
-    wet->stdin_eof = 0;
-    wet->stdin_paused = 0;
-    memset(&wet->ev, 0, num * sizeof(WEVENT_T));
-    create_stream(&wet->stream, 4096 * 1024);
-    wet->stream.fd = STDIN_FILENO;
-    event_set(&wet->stdin_ev, STDIN_FILENO, EV_READ | EV_PERSIST, stdin_handler, wet);
-    event_base_set(wet->base, &wet->stdin_ev);
-    event_add(&wet->stdin_ev, 0);
+    WRITE_EV_THREAD* wet_tmp = NULL;
+    READ_EV_THREAD* ret_tmp = NULL;
 
-    // ret = (READ_EV_THREAD*)cmalloc(sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t));
-    if (cmalloc((void**)&ret, (sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t))) < 0 || ret == NULL) {
+    if (cmalloc((void**)&wet_tmp, (sizeof(WRITE_EV_THREAD) + num * sizeof(WEVENT_T))) < 0 || wet_tmp == NULL) {
         error(EXIT_FAILURE, errno, "not enough memory\n");
         return -1;
     }
-    ret->base = event_init();
-    ret->evno = num;
+
+    memset(wet_tmp, 0, sizeof(WRITE_EV_THREAD) + num * sizeof(WEVENT_T));
+    wet_tmp->base = event_init();
+    if (wet_tmp->base == NULL) {
+        free(wet_tmp);
+        return -1;
+    }
+
+    wet_tmp->evno = num;
+    wet_tmp->next_child = 0;
+    wet_tmp->stdin_eof = 0;
+    wet_tmp->stdin_paused = 0;
+    for (int i = 0; i < num; ++i) {
+        wet_tmp->ev[i].fd = -1;
+    }
+    if (create_stream(&wet_tmp->stream, 4096 * 1024) != E_OK) {
+        event_base_free(wet_tmp->base);
+        free(wet_tmp);
+        return -1;
+    }
+    wet_tmp->stream.fd = STDIN_FILENO;
+    event_set(&wet_tmp->stdin_ev, STDIN_FILENO, EV_READ | EV_PERSIST, stdin_handler, wet_tmp);
+    if (event_base_set(wet_tmp->base, &wet_tmp->stdin_ev) < 0 ||
+        event_add(&wet_tmp->stdin_ev, 0) < 0) {
+        close_stream(&wet_tmp->stream);
+        event_base_free(wet_tmp->base);
+        free(wet_tmp);
+        return -1;
+    }
+
+    if (cmalloc((void**)&ret_tmp, (sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t))) < 0 || ret_tmp == NULL) {
+        close_stream(&wet_tmp->stream);
+        event_base_free(wet_tmp->base);
+        free(wet_tmp);
+        error(EXIT_FAILURE, errno, "not enough memory\n");
+        return -1;
+    }
+
+    memset(ret_tmp, 0, sizeof(READ_EV_THREAD) + num * sizeof(struct fdev_t));
+    ret_tmp->base = event_init();
+    if (ret_tmp->base == NULL) {
+        free(ret_tmp);
+        close_stream(&wet_tmp->stream);
+        event_base_free(wet_tmp->base);
+        free(wet_tmp);
+        return -1;
+    }
+
+    ret_tmp->evno = num;
+    for (int i = 0; i < num; ++i) {
+        ret_tmp->evs[i].fd = -1;
+        ret_tmp->evs[i].stream.fd = -1;
+    }
+
+    wet = wet_tmp;
+    ret = ret_tmp;
+    __atomic_store_n(&thread_error, 0, __ATOMIC_RELAXED);
+    wet_thread_started = 0;
+    ret_thread_started = 0;
+    thread_initialized = 1;
     return 0;
 }
 
@@ -219,17 +293,30 @@ int thread_add(int wfd, int rfd)
     }
     int i = thread_add_idx;
     event_set(&(wet->ev[i].e), wfd, EV_WRITE | EV_PERSIST, event_handler, (void*)&(wet->ev[i]));
-    event_base_set(wet->base, &(wet->ev[i].e));
-    alloc_buffer(&wet->ev[i].buffer, 4096);
+    if (alloc_buffer(&wet->ev[i].buffer, 4096) < 0) {
+        return -1;
+    }
+    if (event_base_set(wet->base, &(wet->ev[i].e)) < 0) {
+        dealloc_buffer(&wet->ev[i].buffer);
+        return -1;
+    }
     wet->ev[i].fd = wfd;
     wet->ev[i].write_enabled = 0;
     
     struct fdev_t* evs = ret->evs;
-    event_set(&evs[i].ev, rfd, EV_READ | EV_PERSIST, revent_handler, (void*)&evs[i]);
-    event_base_set(ret->base, &evs[i].ev);
-    event_add(&evs[i].ev, 0);
-    create_stream(&evs[i].stream, 4096);
+    if (create_stream(&evs[i].stream, 4096) != E_OK) {
+        dealloc_buffer(&wet->ev[i].buffer);
+        return -1;
+    }
     evs[i].stream.fd = rfd;
+    event_set(&evs[i].ev, rfd, EV_READ | EV_PERSIST, revent_handler, (void*)&evs[i]);
+    if (event_base_set(ret->base, &evs[i].ev) < 0 ||
+        event_add(&evs[i].ev, 0) < 0) {
+        close_stream(&evs[i].stream);
+        dealloc_buffer(&wet->ev[i].buffer);
+        wet->ev[i].fd = -1;
+        return -1;
+    }
 
     ++thread_add_idx;
     return 0;
@@ -251,37 +338,71 @@ static void* rthread_proc(void* args)
 
 int thread_start()
 {
-    if (pthread_create(&wet->id, NULL, wthread_proc, (void*)wet) < 0) {
-        log("pthread_create error\n");
+    int rc = pthread_create(&wet->id, NULL, wthread_proc, (void*)wet);
+    if (rc != 0) {
+        log("pthread_create error: %s\n", strerror(rc));
         return -1;
     }
+    wet_thread_started = 1;
 
-    if (pthread_create(&ret->id, NULL, rthread_proc, (void*)ret) < 0) {
-        log("pthread_create error\n");
+    rc = pthread_create(&ret->id, NULL, rthread_proc, (void*)ret);
+    if (rc != 0) {
+        log("pthread_create error: %s\n", strerror(rc));
+        stop_event_loop(wet->base);
+        pthread_join(wet->id, NULL);
+        wet_thread_started = 0;
         return -1;
     }
+    ret_thread_started = 1;
     return 0;
 }
 
 int thread_term()
 {
     void* retval = NULL;
+    int rc = 0;
 
-    pthread_join(wet->id, &retval);
+    if (!thread_initialized) {
+        return 0;
+    }
+
+    if (wet_thread_started) {
+        int join_rc = pthread_join(wet->id, &retval);
+        if (join_rc != 0) {
+            log("pthread_join error: %s\n", strerror(join_rc));
+            rc = -1;
+        }
+    }
     for (int i = 0; i < wet->evno; ++i) {
         dealloc_buffer(&(wet->ev[i].buffer));
     }
     event_base_free(wet->base);
     close_stream(&wet->stream);
     free(wet);
+    wet = NULL;
     
-    pthread_join(ret->id, &retval);
+    if (ret_thread_started) {
+        int join_rc = pthread_join(ret->id, &retval);
+        if (join_rc != 0) {
+            log("pthread_join error: %s\n", strerror(join_rc));
+            rc = -1;
+        }
+    }
     event_base_free(ret->base);
     for (int i = 0; i < ret->evno; ++i) {
         close_stream(&ret->evs[i].stream);
     }
     free(ret);
+    ret = NULL;
 
     thread_add_idx = 0;
-    return 0;
+    wet_thread_started = 0;
+    ret_thread_started = 0;
+    thread_initialized = 0;
+    return rc;
+}
+
+int thread_failed()
+{
+    return __atomic_load_n(&thread_error, __ATOMIC_RELAXED);
 }

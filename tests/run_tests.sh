@@ -6,6 +6,8 @@ echo "Running tests..."
 # Ensure we're running from the root of the project
 cd "$(dirname "$0")/.."
 
+export EVENT_NOEPOLL=1
+
 # Create a sample input
 echo -e "apple\nbanana\napple\norange\nbanana\napple" > tests/data/test_input.txt
 
