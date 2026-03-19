@@ -53,23 +53,31 @@ int cmalloc(void** ptr, size_t size)
     return 0;
 }
 
-void wait_children()
+int wait_children()
 {
     int status = -1;
     int pid = -1;
+    int failed = 0;
+
     while ( (pid = waitpid(-1, &status, 0)) > 0 ) {
         if (WIFSIGNALED(status)) {
             int signo = WTERMSIG(status);
             fprintf(stderr, "child [%d] exit by signal %d\n", pid, signo);
-            exit(EXIT_FAILURE);
+            failed = 1;
         } else {
             int code = WEXITSTATUS(status);
             fprintf(stderr, "child [%d] exit with status %d\n", pid, code);
             if (code != 0) {
-                exit(EXIT_FAILURE);
+                failed = 1;
             }
         }
     }
+
+    if (pid < 0 && errno != ECHILD) {
+        error(EXIT_FAILURE, errno, "waitpid error");
+    }
+
+    return failed ? -1 : 0;
 }
 
 int spawn_process(const char* cmd, int* in, int* out)
@@ -96,6 +104,7 @@ int spawn_process(const char* cmd, int* in, int* out)
         }
 
         close(out_fds[0]);
+        close(in_fds[1]);
         char* shell = get_shell();
         execl(shell, last_component(shell), "-c", cmd, NULL);
         error(EXIT_FAILURE, errno, "execl error");

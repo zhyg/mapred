@@ -57,13 +57,15 @@ int try_read_more(IOstream* s)
         s->capacity *= 2;
     }
 
-    int avail = s->capacity - s->bytes;
-    int nread = read(s->fd, s->cur + s->bytes, avail);
+    size_t avail = s->capacity - s->bytes;
+    ssize_t nread = read(s->fd, s->cur + s->bytes, avail);
     if (nread > 0) {
-        s->bytes += nread;
+        s->bytes += (size_t)nread;
     }
     
-    if (nread == 0) return E_ERROR;
+    if (nread == 0) {
+        return E_EOF;
+    }
     if (nread < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return E_OK;
@@ -83,7 +85,7 @@ int get_line(IOstream* s, char** line, int* len)
     }
     
     *line = s->cur;
-    *len = ++bp - s->cur;
+    *len = (int)(++bp - s->cur);
     s->cur = bp;
     s->bytes -= *len;
     return E_OK;
@@ -97,7 +99,7 @@ int get_all_lines(IOstream* s, char** line, int* len)
     }
     
     *line = s->cur;
-    *len = ++bp - s->cur;
+    *len = (int)(++bp - s->cur);
     s->cur = bp;
     s->bytes -= *len;
     return E_OK;
